@@ -1,0 +1,9 @@
+# 注意: torch 需安装 CUDA 版本以启用 GPU 训练
+#   py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1
+torchvision>=0.16
+ultralytics>=8.1
+opencv-python>=4.8
+numpy>=1.24
+PyYAML>=6.0
+tqdm>=4.66

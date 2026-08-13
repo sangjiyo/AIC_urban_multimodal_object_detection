@@ -1,0 +1,71 @@
+# ============================================================
+# 面向城市场景的视觉多模态目标检测 - 配置文件
+# 三模态输入: RGB(可见光) + Infrared(红外) + Depth(深度)
+# 标签格式: YOLO [class_id, cx, cy, w, h] (归一化)
+# ============================================================
+
+# 类别定义 (0~11，与赛题一致)
+names:
+  0: person
+  1: boat
+  2: animal
+  3: seat
+  4: sign
+  5: bicycle
+  6: car
+  7: ball
+  8: light
+  9: garbage can
+  10: uav
+  11: tricycle
+
+nc: 12   # 类别数
+
+# 模态配置 (固定为 RGB + IR + Depth 拼接成 5 通道输入)
+# 通道布局: [0,1,2]=RGB, [3]=IR灰度, [4]=Depth归一化
+modalities: [rgb, ir, depth]
+
+# 数据路径
+data:
+  root: 初赛数据集-面向城市场景的多模态目标检测/训练集/AIC2026_Train_2000   # 训练集根目录
+  test_root: 初赛数据集-面向城市场景的多模态目标检测/测试集/AIC2026_PHASE_1_1000  # 测试集根目录 (推理用)
+  visible_dir: visible       # RGB 子目录
+  infrared_dir: infrared     # 红外子目录
+  depth_dir: depth           # 深度子目录
+  label_dir: labels          # 标签子目录 (YOLO txt)
+  val_ratio: 0.2             # 从训练集中划分验证集的比例
+  seed: 42
+
+# 深度图参数 (16位, 单位 mm, 有效范围 [0, 19999])
+depth:
+  max_val: 19999
+
+# 模型
+model:
+  yaml: yolov8n.yaml         # ultralytics 内置模型配置 (n/s/m 可选)
+  scale: n                   # n / s / m / l / x
+  pretrained: yolov8n.pt     # COCO 预训练权重 (自动下载), 设为 null 则随机初始化
+  ch: 5                      # 输入通道数: RGB(3) + IR(1) + Depth(1)
+
+# 训练超参
+train:
+  imgsz: 640                 # 输入尺寸 (letterbox 到 imgsz x imgsz)
+  batch_size: 8              # 4GB 显存下 n 模型可用 8
+  epochs: 100
+  lr0: 0.01                  # 初始学习率
+  lrf: 0.01                  # 最终学习率 = lr0 * lrf
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  workers: 4
+  device: 0                  # GPU id, -1 表示 CPU
+  save_dir: runs/train       # 权重保存目录
+  resume: false
+
+# 推理 / 评测 / 提交
+infer:
+  imgsz: 640
+  conf_thres: 0.25
+  iou_thres: 0.7
+  max_det: 100               # 赛题要求每张图最大 100 个框
+  device: 0
