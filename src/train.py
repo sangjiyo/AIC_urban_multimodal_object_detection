@@ -160,6 +160,8 @@ def main():
                 loss = loss.sum()
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()

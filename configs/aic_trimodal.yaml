@@ -52,11 +52,11 @@ train:
   imgsz: 640                 # 输入尺寸 (letterbox 到 imgsz x imgsz)
   batch_size: 4              # 4GB 显存下 s 模型可用 4
   epochs: 200
-  lr0: 0.01                  # 初始学习率 (ultralytics 默认, 类别头随机初始化需足够 lr)
+  lr0: 0.005                 # 初始学习率 (batch 4 下按 batch 8→4 线性缩放, 0.01 会发散)
   lrf: 0.01                  # 最终学习率 = lr0 * lrf
   weight_decay: 0.0005
   momentum: 0.937
-  warmup_epochs: 3
+  warmup_epochs: 2
   workers: 4
   device: 0                  # GPU id, -1 表示 CPU
   save_dir: runs/train       # 权重保存目录
