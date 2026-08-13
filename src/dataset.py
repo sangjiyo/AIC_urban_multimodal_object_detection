@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 
@@ -122,6 +123,111 @@ def box_from_letterbox(boxes: np.ndarray, r: float, left: int, top: int,
     return boxes
 
 
+def random_affine(imgs, labels, imgsz: int = 640, degrees: float = 10.0,
+                  translate: float = 0.1, scale: float = 0.5, shear: float = 2.0):
+    """对三模态图做随机仿射 (旋转+缩放+平移+剪切), 标签同步变换。
+
+    Args:
+        imgs: [rgb(uint8,H,W,3), ir(float32,H,W), depth(float32,H,W)] (已 letterbox/mosaic)
+        labels: (N,5) [cls, cx, cy, w, h] 相对 imgsz 归一化
+    Returns:
+        (imgs', labels') 越界/退化目标被过滤, labels' 为 (M,5)
+    """
+    w = h = imgsz
+    angle = random.uniform(-degrees, degrees)
+    shear_rad = math.radians(random.uniform(-shear, shear))
+    sc = random.uniform(1 - scale, 1 + scale)
+    dx = random.uniform(-translate, translate) * w
+    dy = random.uniform(-translate, translate) * h
+
+    # 仿射矩阵 = 平移 @ 剪切 @ 旋转缩放 @ 中心平移
+    a = math.radians(angle)
+    M = np.array([
+        [sc * math.cos(a), -sc * math.sin(a), 0.0],
+        [sc * math.sin(a), sc * math.cos(a), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    S = np.array([[1.0, math.tan(shear_rad), 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    M = S @ M
+    M[0, 2] += dx + w / 2 - (M[0, 0] * w / 2 + M[0, 1] * h / 2)
+    M[1, 2] += dy + h / 2 - (M[1, 0] * w / 2 + M[1, 1] * h / 2)
+    M2 = M[:2].astype(np.float32)
+
+    rgb = cv2.warpAffine(imgs[0], M2, (w, h), flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=(114, 114, 114))
+    ir = cv2.warpAffine(imgs[1], M2, (w, h), flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    depth = cv2.warpAffine(imgs[2], M2, (w, h), flags=cv2.INTER_NEAREST,
+                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+    # 标签: 4 角点经仿射变换后取包围盒
+    new_labels = []
+    for lab in labels:
+        cls, cx, cy, bw, bh = lab
+        x1 = (cx - bw / 2) * w
+        y1 = (cy - bh / 2) * h
+        x2 = (cx + bw / 2) * w
+        y2 = (cy + bh / 2) * h
+        pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+        pts = (M2[:, :2] @ pts.T).T + M2[:, 2]
+        nx1, ny1 = pts.min(0)
+        nx2, ny2 = pts.max(0)
+        nx1, nx2 = max(0.0, min(nx1, w)), max(0.0, min(nx2, w))
+        ny1, ny2 = max(0.0, min(ny1, h)), max(0.0, min(ny2, h))
+        ncx = (nx1 + nx2) / 2 / w
+        ncy = (ny1 + ny2) / 2 / h
+        nbw = (nx2 - nx1) / w
+        nbh = (ny2 - ny1) / h
+        if nbw > 0.01 and nbh > 0.01:
+            new_labels.append([cls, ncx, ncy, nbw, nbh])
+    labels = np.array(new_labels, dtype=np.float32).reshape(-1, 5) if new_labels else np.zeros((0, 5), dtype=np.float32)
+    return [rgb, ir, depth], labels
+
+
+def mosaic4(raw_imgs, raw_labels_list, imgsz: int = 640):
+    """4 张原图拼成 imgsz x imgsz 的 mosaic。
+
+    Args:
+        raw_imgs: list of 4 个 (rgb, ir, depth) 原图 (未 letterbox)
+        raw_labels_list: list of 4 个 (N,5) 标签, 原图归一化
+    Returns:
+        (rgb, ir, depth) mosaic 图, merged_labels (M,5) 相对 imgsz 归一化
+    """
+    cx = int(random.uniform(imgsz * 0.3, imgsz * 0.7))
+    cy = int(random.uniform(imgsz * 0.3, imgsz * 0.7))
+    regions = [
+        (0, 0, cx, cy),                      # 左上
+        (cx, 0, imgsz - cx, cy),             # 右上
+        (0, cy, cx, imgsz - cy),             # 左下
+        (cx, cy, imgsz - cx, imgsz - cy),    # 右下
+    ]
+    canvas_rgb = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
+    canvas_ir = np.zeros((imgsz, imgsz), dtype=np.float32)
+    canvas_depth = np.zeros((imgsz, imgsz), dtype=np.float32)
+    merged = []
+
+    for (rgb, ir, depth), labels, (x0, y0, rw, rh) in zip(raw_imgs, raw_labels_list, regions):
+        h0, w0 = rgb.shape[:2]
+        r = min(rw / w0, rh / h0)
+        nw, nh = int(round(w0 * r)), int(round(h0 * r))
+        rgb_s = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        ir_s = cv2.resize(ir, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        depth_s = cv2.resize(depth, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        px0, py0 = x0 + (rw - nw) // 2, y0 + (rh - nh) // 2
+        canvas_rgb[py0:py0 + nh, px0:px0 + nw] = rgb_s
+        canvas_ir[py0:py0 + nh, px0:px0 + nw] = ir_s
+        canvas_depth[py0:py0 + nh, px0:px0 + nw] = depth_s
+        if len(labels):
+            lab = labels.copy()
+            lab[:, 1] = (lab[:, 1] * w0 * r + px0) / imgsz
+            lab[:, 2] = (lab[:, 2] * h0 * r + py0) / imgsz
+            lab[:, 3] = lab[:, 3] * w0 * r / imgsz
+            lab[:, 4] = lab[:, 4] * h0 * r / imgsz
+            merged.append(lab)
+    merged = np.concatenate(merged, 0) if merged else np.zeros((0, 5), dtype=np.float32)
+    return canvas_rgb, canvas_ir, canvas_depth, merged
+
+
 class TriModalDataset(Dataset):
     """三模态目标检测数据集 (训练/验证)。
 
@@ -156,6 +262,7 @@ class TriModalDataset(Dataset):
         self._label_dir = label_dir
 
         self.rng = random.Random(seed)
+        self.mosaic_prob = 0.5  # Mosaic 增强概率
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -185,51 +292,61 @@ class TriModalDataset(Dataset):
                     boxes.append([cls, cx, cy, w, h])
         return np.array(boxes, dtype=np.float32).reshape(-1, 5) if boxes else np.zeros((0, 5), dtype=np.float32)
 
+    def _load_raw(self, stem: str):
+        """加载三模态原图 + 原图归一化标签 (不做 letterbox/增强)。"""
+        rgb = imread_unicode(self._find_file(self._visible_dir, stem))
+        h0, w0 = rgb.shape[:2]
+        ir = load_infrared_gray(self._find_file(self._infrared_dir, stem))
+        depth = load_depth(self._find_file(self._depth_dir, stem), self.max_depth)
+        labels = self._load_labels(stem)  # (N,5) [cls, cx, cy, w, h] 原图归一化
+        return rgb, ir, depth, labels, h0, w0
+
     def __getitem__(self, idx: int):
         stem = self.samples[idx]
 
-        # 加载三模态原始图像
-        rgb = imread_unicode(self._find_file(self._visible_dir, stem))
-        h0, w0 = rgb.shape[:2]
-
-        ir_gray = load_infrared_gray(self._find_file(self._infrared_dir, stem))
-        depth = load_depth(self._find_file(self._depth_dir, stem), self.max_depth)
-
-        # letterbox 几何参数 (以 RGB 尺寸为准, 三模态空间对齐)
-        r, top, left, bottom, right, new_h, new_w = letterbox(h0, w0, self.imgsz)
-
-        # 各模态分别 letterbox
-        rgb_lb = apply_letterbox(rgb, top, bottom, left, right, new_h, new_w, pad_value=114)
-        ir_lb = apply_letterbox(ir_gray, top, bottom, left, right, new_h, new_w, pad_value=0)
-        depth_lb = apply_letterbox(depth, top, bottom, left, right, new_h, new_w, pad_value=0)
-
-        # 标签: 归一化 -> letterbox 归一化
-        labels = self._load_labels(stem)
-        if len(labels):
-            boxes = box_to_letterbox(labels[:, 1:], r, left, top, h0, w0, self.imgsz)
+        if self.train and self.rng.random() < self.mosaic_prob:
+            # Mosaic: 随机取 4 张图拼接 (三模态同步)
+            stems = [stem] + [self.samples[self.rng.randint(0, len(self))] for _ in range(3)]
+            raws = [self._load_raw(s) for s in stems]
+            rgb, ir, depth, labels = mosaic4(
+                [(r[0], r[1], r[2]) for r in raws],
+                [r[3] for r in raws],
+                self.imgsz,
+            )
+            meta = (1.0, 0, 0, self.imgsz, self.imgsz)  # 训练时 meta 不用于推理
         else:
-            boxes = np.zeros((0, 4), dtype=np.float32)
+            rgb, ir, depth, labels, h0, w0 = self._load_raw(stem)
+            r, top, left, bottom, right, new_h, new_w = letterbox(h0, w0, self.imgsz)
+            rgb = apply_letterbox(rgb, top, bottom, left, right, new_h, new_w, pad_value=114)
+            ir = apply_letterbox(ir, top, bottom, left, right, new_h, new_w, pad_value=0)
+            depth = apply_letterbox(depth, top, bottom, left, right, new_h, new_w, pad_value=0)
+            if len(labels):
+                labels[:, 1:] = box_to_letterbox(labels[:, 1:], r, left, top, h0, w0, self.imgsz)
+            meta = (r, left, top, h0, w0)
 
-        # 训练时水平翻转增强
+        # 随机仿射增强 (train)
         if self.train and self.rng.random() < 0.5:
-            rgb_lb = np.ascontiguousarray(rgb_lb[:, ::-1])
-            ir_lb = np.ascontiguousarray(ir_lb[:, ::-1])
-            depth_lb = np.ascontiguousarray(depth_lb[:, ::-1])
-            if len(boxes):
-                boxes[:, 0] = 1.0 - boxes[:, 0]
+            (rgb, ir, depth), labels = random_affine([rgb, ir, depth], labels, self.imgsz)
+
+        # 水平翻转增强 (train)
+        if self.train and self.rng.random() < 0.5:
+            rgb = np.ascontiguousarray(rgb[:, ::-1])
+            ir = np.ascontiguousarray(ir[:, ::-1])
+            depth = np.ascontiguousarray(depth[:, ::-1])
+            if len(labels):
+                labels[:, 1] = 1.0 - labels[:, 1]
 
         # 归一化 + 拼接为 5 通道 (C, H, W)
-        rgb_norm = normalize_rgb(rgb_lb)          # (H, W, 3)
-        ir_norm = ir_lb[..., None]                 # (H, W, 1)
-        depth_norm = depth_lb[..., None]           # (H, W, 1)
+        rgb_norm = normalize_rgb(rgb)          # (H, W, 3)
+        ir_norm = ir[..., None]                 # (H, W, 1)
+        depth_norm = depth[..., None]           # (H, W, 1)
         img = np.concatenate([rgb_norm, ir_norm, depth_norm], axis=-1)  # (H, W, 5)
         img = torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)))
 
         cls = torch.from_numpy(labels[:, 0].astype(np.int64)) if len(labels) else torch.empty(0, dtype=torch.int64)
-        boxes = torch.from_numpy(boxes)
+        boxes = torch.from_numpy(labels[:, 1:5].astype(np.float32)) if len(labels) else torch.zeros((0, 4), dtype=torch.float32)
 
-        return {"img": img, "cls": cls, "boxes": boxes, "stem": stem,
-                "meta": (r, left, top, h0, w0)}
+        return {"img": img, "cls": cls, "boxes": boxes, "stem": stem, "meta": meta}
 
     @staticmethod
     def collate_fn(batch):

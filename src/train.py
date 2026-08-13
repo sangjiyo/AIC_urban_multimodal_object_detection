@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import math
 import time
@@ -22,7 +23,7 @@ from .config import load_config, resolve_data_root
 from .dataset import TriModalDataset
 from .infer import predict_one
 from .metrics import compute_map
-from .model import build_criterion, build_model
+from .model import build_criterion, build_fusion_model, build_model
 
 
 def parse_args():
@@ -35,12 +36,22 @@ def parse_args():
     p.add_argument("--device", type=int, default=None)
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--no-amp", action="store_true", help="禁用混合精度")
+    p.add_argument("--fusion", action="store_true", help="使用双流模态融合模型")
     return p.parse_args()
 
 
 def set_lr(optimizer, lr: float):
     for pg in optimizer.param_groups:
         pg["lr"] = lr
+
+
+def update_ema(ema_model, model, decay: float = 0.9999):
+    """指数移动平均: 参数 ema = decay*ema + (1-decay)*model, buffer (BN) 直接同步。"""
+    with torch.no_grad():
+        for p_ema, p in zip(ema_model.parameters(), model.parameters()):
+            p_ema.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
+        for b_ema, b in zip(ema_model.buffers(), model.buffers()):
+            b_ema.copy_(b)
 
 
 def validate(model, val_dataset, val_indices, device, conf_thres=0.25, iou_thres=0.7):
@@ -103,9 +114,16 @@ def main():
     print(f"[数据] 总样本 {n}, 训练 {len(train_idx)}, 验证 {len(val_idx)}, imgsz {imgsz}")
 
     # ---------- 模型 ----------
-    model = build_model(cfg).to(device)
+    if args.fusion:
+        model = build_fusion_model(cfg).to(device)
+        print("[模型] 使用双流模态融合模型 (RGB backbone + IR/Depth 残差分支)")
+    else:
+        model = build_model(cfg).to(device)
     criterion = build_criterion(model)
     model.args = model.args  # criterion 已引用
+
+    # EMA 模型副本 (验证/保存用, 不参与反向传播)
+    ema = copy.deepcopy(model).eval()
 
     # ---------- 优化器 & 调度 ----------
     optimizer = torch.optim.SGD(model.parameters(), lr=lr0,
@@ -145,20 +163,21 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
+            update_ema(ema, model)
 
             total_loss += loss.item()
             if (i + 1) % max(1, nb // 5) == 0 or i == nb - 1:
                 print(f"  epoch {epoch + 1}/{epochs}  [{i + 1}/{nb}]  "
                       f"loss {loss.item():.3f}  lr {lr:.5f}")
 
-        # ---------- 验证 ----------
-        m = validate(model, val_full, val_idx, device)
+        # ---------- 验证 (用 EMA 权重) ----------
+        m = validate(ema, val_full, val_idx, device)
         cur_map = m["map50_95"]
         print(f"[epoch {epoch + 1}/{epochs}] train_loss {total_loss / max(1, nb):.3f}  "
               f"val mAP@50-95 {cur_map:.4f}  ({time.time() - t0:.1f}s)")
 
-        # 保存 best / last
-        ckpt = {"model": model.state_dict(), "epoch": epoch, "best_map": cur_map, "cfg": cfg}
+        # 保存 best / last (保存 EMA 权重)
+        ckpt = {"model": ema.state_dict(), "epoch": epoch, "best_map": cur_map, "cfg": cfg}
         torch.save(ckpt, save_dir / "last.pt")
         if cur_map > best_map:
             best_map = cur_map

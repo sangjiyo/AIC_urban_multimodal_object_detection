@@ -13,7 +13,7 @@ import torch
 from .config import load_config, resolve_data_root, resolve_test_root
 from .dataset import TriModalDataset
 from .infer import run_inference
-from .model import build_model, load_checkpoint
+from .model import build_fusion_model, build_model, load_checkpoint
 
 
 def parse_args():
@@ -28,6 +28,8 @@ def parse_args():
     p.add_argument("--iou", type=float, default=0.7)
     p.add_argument("--max-det", type=int, default=100)
     p.add_argument("--device", type=int, default=None)
+    p.add_argument("--tta", action="store_true", help="启用水平翻转 TTA")
+    p.add_argument("--fusion", action="store_true", help="权重为双流融合模型")
     return p.parse_args()
 
 
@@ -48,7 +50,8 @@ def main():
     else:
         root = resolve_test_root(cfg)
 
-    model = build_model(cfg, pretrained="")  # 推理用 checkpoint, 不加载预训练
+    # 推理用 checkpoint, 不加载预训练; 融合模型需用对应结构
+    model = build_fusion_model(cfg, pretrained="") if args.fusion else build_model(cfg, pretrained="")
     model = load_checkpoint(model, args.weights, device)
     model.eval()
 
@@ -59,8 +62,8 @@ def main():
 
     run_inference(model, dataset, out_dir,
                   conf_thres=args.conf, iou_thres=args.iou,
-                  max_det=args.max_det, device=device)
-    print(f"[完成] 预测结果已写出到 {out_dir} (共 {len(dataset)} 张)")
+                  max_det=args.max_det, device=device, tta=args.tta)
+    print(f"[完成] 预测结果已写出到 {out_dir} (共 {len(dataset)} 张, tta={args.tta})")
 
 
 if __name__ == "__main__":

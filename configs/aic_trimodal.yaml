@@ -42,17 +42,17 @@ depth:
 
 # 模型
 model:
-  yaml: yolov8n.yaml         # ultralytics 内置模型配置 (n/s/m 可选)
-  scale: n                   # n / s / m / l / x
-  pretrained: yolov8n.pt     # COCO 预训练权重 (自动下载), 设为 null 则随机初始化
+  yaml: yolov8s.yaml         # ultralytics 内置模型配置 (n/s/m 可选)
+  scale: s                   # n / s / m / l / x
+  pretrained: yolov8s.pt     # COCO 预训练权重 (自动下载), 设为 null 则随机初始化
   ch: 5                      # 输入通道数: RGB(3) + IR(1) + Depth(1)
 
 # 训练超参
 train:
   imgsz: 640                 # 输入尺寸 (letterbox 到 imgsz x imgsz)
-  batch_size: 8              # 4GB 显存下 n 模型可用 8
-  epochs: 100
-  lr0: 0.01                  # 初始学习率
+  batch_size: 4              # 4GB 显存下 s 模型可用 4
+  epochs: 200
+  lr0: 0.01                  # 初始学习率 (ultralytics 默认, 类别头随机初始化需足够 lr)
   lrf: 0.01                  # 最终学习率 = lr0 * lrf
   weight_decay: 0.0005
   momentum: 0.937
