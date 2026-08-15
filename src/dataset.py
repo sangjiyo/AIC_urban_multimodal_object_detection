@@ -239,7 +239,8 @@ class TriModalDataset(Dataset):
     """
 
     def __init__(self, root: Path, imgsz: int = 640, max_depth: int = 19999,
-                 train: bool = True, seed: int = 42):
+                 train: bool = True, seed: int = 42,
+                 mosaic_prob: float = 0.5, affine_prob: float = 0.5, flip_prob: float = 0.5):
         self.root = Path(root)
         self.imgsz = imgsz
         self.max_depth = max_depth
@@ -262,7 +263,9 @@ class TriModalDataset(Dataset):
         self._label_dir = label_dir
 
         self.rng = random.Random(seed)
-        self.mosaic_prob = 0.5  # Mosaic 增强概率
+        self.mosaic_prob = mosaic_prob   # Mosaic 增强概率
+        self.affine_prob = affine_prob   # 随机仿射增强概率
+        self.flip_prob = flip_prob       # 水平翻转增强概率
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -325,11 +328,11 @@ class TriModalDataset(Dataset):
             meta = (r, left, top, h0, w0)
 
         # 随机仿射增强 (train)
-        if self.train and self.rng.random() < 0.5:
+        if self.train and self.rng.random() < self.affine_prob:
             (rgb, ir, depth), labels = random_affine([rgb, ir, depth], labels, self.imgsz)
 
         # 水平翻转增强 (train)
-        if self.train and self.rng.random() < 0.5:
+        if self.train and self.rng.random() < self.flip_prob:
             rgb = np.ascontiguousarray(rgb[:, ::-1])
             ir = np.ascontiguousarray(ir[:, ::-1])
             depth = np.ascontiguousarray(depth[:, ::-1])

@@ -84,6 +84,10 @@ def main():
     lr0 = args.lr0 or tc.get("lr0", 0.01)
     device_id = args.device if args.device is not None else tc.get("device", 0)
     workers = args.workers if args.workers is not None else tc.get("workers", 0)
+    mosaic_prob = tc.get("mosaic_prob", 0.5)
+    affine_prob = tc.get("affine_prob", 0.5)
+    flip_prob = tc.get("flip_prob", 0.5)
+    ema_enabled = tc.get("ema", False)
 
     device = torch.device(f"cuda:{device_id}" if (torch.cuda.is_available() and device_id >= 0) else "cpu")
     amp = device.type == "cuda" and not args.no_amp
@@ -96,7 +100,8 @@ def main():
 
     # ---------- 数据 ----------
     full = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"],
-                           train=True, seed=cfg["data"].get("seed", 42))
+                           train=True, seed=cfg["data"].get("seed", 42),
+                           mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob)
     n = len(full)
     val_ratio = cfg["data"].get("val_ratio", 0.2)
     n_val = max(1, int(round(n * val_ratio)))
@@ -123,7 +128,7 @@ def main():
     model.args = model.args  # criterion 已引用
 
     # EMA 模型副本 (验证/保存用, 不参与反向传播)
-    ema = copy.deepcopy(model).eval()
+    ema = copy.deepcopy(model).eval() if ema_enabled else None
 
     # ---------- 优化器 & 调度 ----------
     optimizer = torch.optim.SGD(model.parameters(), lr=lr0,
@@ -136,6 +141,7 @@ def main():
 
     best_map = -1.0
     print(f"[训练] epochs {epochs}, batch {batch_size}, lr0 {lr0}, amp {amp}, device {device}")
+    print(f"[增强] mosaic {mosaic_prob}, affine {affine_prob}, flip {flip_prob}  |  EMA {ema_enabled}")
 
     for epoch in range(epochs):
         model.train()
@@ -165,21 +171,23 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            update_ema(ema, model)
+            if ema is not None:
+                update_ema(ema, model)
 
             total_loss += loss.item()
             if (i + 1) % max(1, nb // 5) == 0 or i == nb - 1:
                 print(f"  epoch {epoch + 1}/{epochs}  [{i + 1}/{nb}]  "
                       f"loss {loss.item():.3f}  lr {lr:.5f}")
 
-        # ---------- 验证 (用 EMA 权重) ----------
-        m = validate(ema, val_full, val_idx, device)
+        # ---------- 验证 (用 EMA 权重, 未启用 EMA 时直接用 model) ----------
+        m = validate(ema if ema is not None else model, val_full, val_idx, device)
         cur_map = m["map50_95"]
         print(f"[epoch {epoch + 1}/{epochs}] train_loss {total_loss / max(1, nb):.3f}  "
               f"val mAP@50-95 {cur_map:.4f}  ({time.time() - t0:.1f}s)")
 
-        # 保存 best / last (保存 EMA 权重)
-        ckpt = {"model": ema.state_dict(), "epoch": epoch, "best_map": cur_map, "cfg": cfg}
+        # 保存 best / last (保存 EMA 权重, 未启用 EMA 时保存 model 权重)
+        ckpt = {"model": (ema if ema is not None else model).state_dict(),
+                "epoch": epoch, "best_map": cur_map, "cfg": cfg}
         torch.save(ckpt, save_dir / "last.pt")
         if cur_map > best_map:
             best_map = cur_map

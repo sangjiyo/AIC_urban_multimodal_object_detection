@@ -1,0 +1,71 @@
+# ============================================================
+# 三模态目标检测 - yolov8s 融合模型配置 (更大容量)
+# 与 yolov8n 版配方完全一致: batch 缩到 4 (4GB 显存), lr0 保持 0.01
+# 关键: 关 Mosaic/仿射 (小数据集), 去 EMA, 只留水平翻转
+# ============================================================
+
+# 类别定义 (0~11，与赛题一致)
+names:
+  0: person
+  1: boat
+  2: animal
+  3: seat
+  4: sign
+  5: bicycle
+  6: car
+  7: ball
+  8: light
+  9: garbage can
+  10: uav
+  11: tricycle
+
+nc: 12   # 类别数
+
+modalities: [rgb, ir, depth]
+
+# 数据路径
+data:
+  root: 初赛数据集-面向城市场景的多模态目标检测/训练集/AIC2026_Train_2000   # 训练集根目录
+  test_root: 初赛数据集-面向城市场景的多模态目标检测/测试集/AIC2026_PHASE_1_1000  # 测试集根目录 (推理用)
+  visible_dir: visible
+  infrared_dir: infrared
+  depth_dir: depth
+  label_dir: labels
+  val_ratio: 0.2
+  seed: 42
+
+depth:
+  max_val: 19999
+
+model:
+  yaml: yolov8s.yaml
+  scale: s
+  pretrained: yolov8s.pt
+  ch: 5
+
+train:
+  imgsz: 640
+  batch_size: 4              # 4GB 显存下 s 模型只能 4
+  epochs: 200
+  lr0: 0.01                  # 保持 0.01 (关强增强后应安全, smoke test 验证)
+  lrf: 0.01
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  workers: 4
+  device: 0
+  save_dir: runs/train_s     # 独立保存目录, 不覆盖 yolov8n 成果
+  resume: false
+  # ---- 增强开关 (小数据集关闭强增强) ----
+  mosaic_prob: 0.0
+  affine_prob: 0.0
+  flip_prob: 0.5
+  # ---- EMA (关闭) ----
+  ema: false
+
+infer:
+  imgsz: 640                 # 必须 640 (1280 会崩)
+  conf_thres: 0.25           # 必须 0.25 (降到 0.001 会反噬: val 提升但 test 暴跌 33.8→27.5)
+  iou_thres: 0.7
+  max_det: 100
+  device: 0
