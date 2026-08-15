@@ -1,0 +1,77 @@
+# ============================================================
+# 三模态目标检测 - yolov8s 融合模型「弱类精修」配置
+# 从 runs/train_s/best.pt (36.4 分) 出发, 类别加权采样 + 低 lr 全量微调,
+# 专门提升弱类 (bicycle/ball/sign/animal/person 等 AP 低的类别)。
+#
+# 说明: 之前高分辨率精修 (832/960/1280) 已被诊断否定 —— 640→832 直推 mAP 掉一半
+# (0.2820→0.1428), 且 freeze+5e-5 精修 2 epoch 后 0.1427 ≈ 直推, 说明跨尺度无法靠
+# 精修解决。正确做法是把「精修」用在 SAR 国一方案的原始用途上: 弱类提升。
+# ============================================================
+
+names:
+  0: person
+  1: boat
+  2: animal
+  3: seat
+  4: sign
+  5: bicycle
+  6: car
+  7: ball
+  8: light
+  9: garbage can
+  10: uav
+  11: tricycle
+
+nc: 12
+
+modalities: [rgb, ir, depth]
+
+data:
+  root: 初赛数据集-面向城市场景的多模态目标检测/训练集/AIC2026_Train_2000
+  test_root: 初赛数据集-面向城市场景的多模态目标检测/测试集/AIC2026_PHASE_1_1000
+  visible_dir: visible
+  infrared_dir: infrared
+  depth_dir: depth
+  label_dir: labels
+  val_ratio: 0.2
+  seed: 42
+
+depth:
+  max_val: 19999
+
+model:
+  yaml: yolov8s.yaml
+  scale: s
+  pretrained: yolov8s.pt
+  ch: 5
+
+train:
+  imgsz: 640                 # 保持 640 (高分辨率已否决)
+  batch_size: 4
+  epochs: 30                 # 从 best.pt 微调, 30 epoch 足够看到弱类提升
+  lr0: 0.001                 # 1/10 原始 lr, 全量微调 (比 freeze 精修的 5e-5 高, 能真正学弱类)
+  lrf: 0.01
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 0           # 从 best.pt 继续, 不需 warmup
+  workers: 4
+  device: 0
+  save_dir: runs/cw_s        # 独立目录
+  resume: false
+  # ---- 弱类精修核心 ----
+  init_weights: runs/train_s/best.pt   # 从 yolov8s 最优权重继续
+  freeze: 0                  # 不冻结, 低 lr 全量微调 (best.pt 保存逻辑保证整体 mAP 最优)
+  cls_weighted_sampling: true  # 类别加权采样 (1/sqrt(freq), 弱类过采样)
+  # ---- 增强: 与原训练一致 (关 Mosaic/仿射, 留翻转) ----
+  mosaic_prob: 0.0
+  affine_prob: 0.0
+  flip_prob: 0.5
+  # ---- EMA (关闭) ----
+  ema: false
+
+infer:
+  imgsz: 640
+  conf_thres: 0.25
+  iou_thres: 0.7
+  max_det: 100
+  device: 0

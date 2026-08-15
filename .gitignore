@@ -19,7 +19,7 @@ runs/
 材料/
 
 # ===== 提交产物 =====
-submission.zip
+submission*.zip
 
 # ===== IDE / 工具配置 =====
 .vs/

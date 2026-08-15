@@ -240,7 +240,9 @@ class TriModalDataset(Dataset):
 
     def __init__(self, root: Path, imgsz: int = 640, max_depth: int = 19999,
                  train: bool = True, seed: int = 42,
-                 mosaic_prob: float = 0.5, affine_prob: float = 0.5, flip_prob: float = 0.5):
+                 mosaic_prob: float = 0.5, affine_prob: float = 0.5, flip_prob: float = 0.5,
+                 affine_degrees: float = 10.0, affine_translate: float = 0.1,
+                 affine_scale: float = 0.5, affine_shear: float = 2.0):
         self.root = Path(root)
         self.imgsz = imgsz
         self.max_depth = max_depth
@@ -266,6 +268,10 @@ class TriModalDataset(Dataset):
         self.mosaic_prob = mosaic_prob   # Mosaic 增强概率
         self.affine_prob = affine_prob   # 随机仿射增强概率
         self.flip_prob = flip_prob       # 水平翻转增强概率
+        self.affine_degrees = affine_degrees   # 仿射旋转角 (±deg)
+        self.affine_translate = affine_translate  # 仿射平移 (±比例)
+        self.affine_scale = affine_scale   # 仿射缩放 (±比例)
+        self.affine_shear = affine_shear   # 仿射剪切 (±deg)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -329,7 +335,10 @@ class TriModalDataset(Dataset):
 
         # 随机仿射增强 (train)
         if self.train and self.rng.random() < self.affine_prob:
-            (rgb, ir, depth), labels = random_affine([rgb, ir, depth], labels, self.imgsz)
+            (rgb, ir, depth), labels = random_affine(
+                [rgb, ir, depth], labels, self.imgsz,
+                degrees=self.affine_degrees, translate=self.affine_translate,
+                scale=self.affine_scale, shear=self.affine_shear)
 
         # 水平翻转增强 (train)
         if self.train and self.rng.random() < self.flip_prob:

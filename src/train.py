@@ -11,19 +11,20 @@ import copy
 import functools
 import math
 import time
+from collections import Counter
 from pathlib import Path
 
 # 重定向到文件时也实时刷新输出, 便于后台训练时监控进度
 print = functools.partial(print, flush=True)
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 
 from .config import load_config, resolve_data_root
 from .dataset import TriModalDataset
 from .infer import predict_one
 from .metrics import compute_map
-from .model import build_criterion, build_fusion_model, build_model
+from .model import build_criterion, build_fusion_model, build_model, load_checkpoint
 
 
 def parse_args():
@@ -37,6 +38,8 @@ def parse_args():
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--no-amp", action="store_true", help="禁用混合精度")
     p.add_argument("--fusion", action="store_true", help="使用双流模态融合模型")
+    p.add_argument("--init-weights", type=str, default=None, help="从已有 checkpoint 继续训练 (精修微调)")
+    p.add_argument("--freeze", type=int, default=None, help="冻结前 N 层 (backbone), 只训 neck+head")
     return p.parse_args()
 
 
@@ -87,7 +90,14 @@ def main():
     mosaic_prob = tc.get("mosaic_prob", 0.5)
     affine_prob = tc.get("affine_prob", 0.5)
     flip_prob = tc.get("flip_prob", 0.5)
+    affine_degrees = tc.get("affine_degrees", 10.0)
+    affine_translate = tc.get("affine_translate", 0.1)
+    affine_scale = tc.get("affine_scale", 0.5)
+    affine_shear = tc.get("affine_shear", 2.0)
+    freeze = args.freeze if args.freeze is not None else tc.get("freeze", 0)
+    init_weights = args.init_weights or tc.get("init_weights")
     ema_enabled = tc.get("ema", False)
+    cls_weighted = tc.get("cls_weighted_sampling", False)
 
     device = torch.device(f"cuda:{device_id}" if (torch.cuda.is_available() and device_id >= 0) else "cpu")
     amp = device.type == "cuda" and not args.no_amp
@@ -98,10 +108,24 @@ def main():
         save_dir = Path(__file__).resolve().parent.parent / save_dir
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # 训练日志同时 tee 到 save_dir/train_log.txt (不再依赖 shell 重定向)
+    import builtins as _builtins
+    _log_fh = open(save_dir / "train_log.txt", "a", encoding="utf-8")
+    _orig_print = _builtins.print
+
+    def _tee_print(*args, **kwargs):
+        _orig_print(*args, **kwargs, flush=True)
+        _orig_print(*args, **kwargs, file=_log_fh, flush=True)
+
+    global print
+    print = _tee_print
+
     # ---------- 数据 ----------
     full = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"],
                            train=True, seed=cfg["data"].get("seed", 42),
-                           mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob)
+                           mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob,
+                           affine_degrees=affine_degrees, affine_translate=affine_translate,
+                           affine_scale=affine_scale, affine_shear=affine_shear)
     n = len(full)
     val_ratio = cfg["data"].get("val_ratio", 0.2)
     n_val = max(1, int(round(n * val_ratio)))
@@ -112,7 +136,28 @@ def main():
     # 验证集禁用增强 (重建一个 train=False 的 dataset 用于 val)
     val_full = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"], train=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+    # 可选: 类别加权采样 (针对弱类过采样, 缓解类别不平衡, 借鉴 SAR 国一两阶段精修)
+    sampler = None
+    if cls_weighted:
+        cls_count = Counter()
+        for idx in train_idx:
+            for l in full._load_labels(full.samples[idx]):
+                cls_count[int(l[0])] += 1
+        # 类别权重 = 1/sqrt(freq), 归一化到均值 1 (弱类权重高, 被过采样)
+        cls_w = {c: 1.0 / math.sqrt(cnt) for c, cnt in cls_count.items()}
+        mw = sum(cls_w.values()) / max(1, len(cls_w))
+        cls_w = {c: w / mw for c, w in cls_w.items()}
+        # 样本权重 = 样本内类别权重的最大值 (含弱类的样本整体被过采样)
+        sample_weights = []
+        for idx in train_idx:
+            labels = full._load_labels(full.samples[idx])
+            w = max((cls_w[int(l[0])] for l in labels), default=1.0) if len(labels) else 1.0
+            sample_weights.append(w)
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_idx), replacement=True)
+        print(f"[采样] 类别加权采样: 权重 { {k: round(v, 2) for k, v in sorted(cls_w.items())} }")
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                              shuffle=(sampler is None), sampler=sampler,
                               num_workers=workers, collate_fn=TriModalDataset.collate_fn,
                               pin_memory=(device.type == "cuda"))
 
@@ -124,6 +169,22 @@ def main():
         print("[模型] 使用双流模态融合模型 (RGB backbone + IR/Depth 残差分支)")
     else:
         model = build_model(cfg).to(device)
+
+    # 可选: 从已有 checkpoint 初始化 (精修微调, 替代 COCO 预训练)
+    if init_weights:
+        model = load_checkpoint(model, init_weights, device)
+        print(f"[模型] 从 checkpoint 初始化: {init_weights}")
+
+    # 可选: 冻结前 N 层 (backbone), 只训 neck+head (精修阶段)
+    if freeze > 0:
+        for i, layer in enumerate(model.model):
+            if i < freeze:
+                for p in layer.parameters():
+                    p.requires_grad = False
+        n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"[freeze] 冻结前 {freeze} 层, 冻结参数 {n_frozen}/{n_total} ({100*n_frozen/n_total:.1f}%)")
+
     criterion = build_criterion(model)
     model.args = model.args  # criterion 已引用
 
