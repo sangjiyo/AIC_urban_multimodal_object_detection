@@ -40,6 +40,7 @@ def parse_args():
     p.add_argument("--fusion", action="store_true", help="使用双流模态融合模型")
     p.add_argument("--init-weights", type=str, default=None, help="从已有 checkpoint 继续训练 (精修微调)")
     p.add_argument("--freeze", type=int, default=None, help="冻结前 N 层 (backbone), 只训 neck+head")
+    p.add_argument("--save-dir", type=str, default=None, help="覆盖配置中的 save_dir")
     return p.parse_args()
 
 
@@ -103,7 +104,7 @@ def main():
     amp = device.type == "cuda" and not args.no_amp
 
     root = resolve_data_root(cfg)
-    save_dir = Path(tc.get("save_dir", "runs/train"))
+    save_dir = Path(args.save_dir or tc.get("save_dir", "runs/train"))
     if not save_dir.is_absolute():
         save_dir = Path(__file__).resolve().parent.parent / save_dir
     save_dir.mkdir(parents=True, exist_ok=True)
