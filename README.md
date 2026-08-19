@@ -100,6 +100,8 @@ py -m src.evaluate --pred-dir runs/predict_s --gt-dir 数据目录/labels
 
 ## 关键经验（踩坑记录）
 
+> 完整实验记录、分数演进、所有尝试（有效/无效）见 [EXPERIMENTS.md](EXPERIMENTS.md)。
+
 这些坑都曾让提交分数暴跌，务必遵守：
 
 1. **别在小数据集上叠加强增强 + 减半 lr**：Mosaic+仿射 + `lr0=0.005` 会让 val 从 0.2168 回退到 0.1588（提交 32→15 分）。正确配方是 **batch8/lr0.01/关 Mosaic+仿射/只留水平翻转**（batch4 时 lr0 仍保持 0.01）。
@@ -113,7 +115,10 @@ py -m src.evaluate --pred-dir runs/predict_s --gt-dir 数据目录/labels
 |------|---------------|----------|
 | baseline yolov8n | 0.2168 | 32.989 |
 | yolov8n + 融合 | 0.2453 | 33.799 |
-| **yolov8s + 融合** | **0.2562** | **36.4260** |
+| yolov8s + 融合 | 0.2562 | 36.4260 |
+| yolov8m + 渐进 1024 | 0.3730 | 46.523 |
+| yolov8l 基础 640 | 0.3635 | 待渐进 |
+| **yolov8x 基础 640** | **0.3777** | 待渐进 |
 
 **per-class 诊断结论**（12 类等权平均，每类 +0.01 ≈ 总 mAP +0.0008）：
 
