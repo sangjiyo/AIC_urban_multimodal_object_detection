@@ -1,0 +1,82 @@
+# ============================================================
+# 三模态目标检测 - yolov8l 融合模型「基础训练」配置 (640)
+# 相较 yolov8m 的升级: 更大模型 yolov8l + 温和仿射增强。
+#
+# 关键修正 (来自 train_l_ms 失败实验):
+#   1. 输入分辨率多尺度 (imgsz 随机) 会让 DFL 宽高回归失效 (val 0.02 崩),
+#      改用「渐进训练」实现多尺度 (640→768→896→1024, 见 scripts/run_multiscale_l.sh)。
+#   2. 强增强 (scale±50% + rotate±10°) 拖慢收敛, 降为温和档 (±25% 缩放, ±5° 旋转)。
+# ============================================================
+
+# 类别定义 (0~11，与赛题一致)
+names:
+  0: person
+  1: boat
+  2: animal
+  3: seat
+  4: sign
+  5: bicycle
+  6: car
+  7: ball
+  8: light
+  9: garbage can
+  10: uav
+  11: tricycle
+
+nc: 12
+
+modalities: [rgb, ir, depth]
+
+# 数据路径
+data:
+  root: 初赛数据集-面向城市场景的多模态目标检测/训练集/AIC2026_Train_2000
+  test_root: 初赛数据集-面向城市场景的多模态目标检测/测试集/AIC2026_PHASE_1_1000
+  visible_dir: visible
+  infrared_dir: infrared
+  depth_dir: depth
+  label_dir: labels
+  val_ratio: 0.2
+  seed: 42
+
+depth:
+  max_val: 19999
+
+model:
+  yaml: yolov8l.yaml
+  scale: l
+  pretrained: yolov8l.pt
+  ch: 5
+
+train:
+  imgsz: 640                 # 基础尺度 (渐进训练起点)
+  batch_size: 8              # 640 尺度下 yolov8l batch 8 显存充足
+  epochs: 100
+  lr0: 0.01
+  lrf: 0.01
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  workers: 8
+  device: 0
+  save_dir: runs/train_l
+  resume: false
+  init_weights: null
+  freeze: 0
+  cls_weighted_sampling: false
+  # ---- 增强: 温和仿射 (旋转/缩放/平移), 满足泛化需求又不破坏预训练 ----
+  mosaic_prob: 0.0
+  affine_prob: 0.5
+  flip_prob: 0.5
+  affine_degrees: 5.0        # ±5° 旋转 (温和)
+  affine_translate: 0.05     # ±5% 平移 (温和)
+  affine_scale: 0.25         # ±25% 缩放 (温和, 避免 ±50% 拖垮收敛)
+  affine_shear: 0.0          # 不剪切 (避免过度变形)
+  # ---- EMA (关闭) ----
+  ema: false
+
+infer:
+  imgsz: 1024
+  conf_thres: 0.25
+  iou_thres: 0.7
+  max_det: 100
+  device: 0

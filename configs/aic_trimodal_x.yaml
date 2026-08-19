@@ -1,0 +1,78 @@
+# ============================================================
+# 三模态目标检测 - yolov8x 融合模型「基础训练」配置 (640)
+# 与 yolov8l 配方完全一致, 仅换更大模型 yolov8x (~68M 参数)。
+# 温和仿射增强 + 渐进训练 (640→768→896→1024)。
+# ============================================================
+
+# 类别定义 (0~11，与赛题一致)
+names:
+  0: person
+  1: boat
+  2: animal
+  3: seat
+  4: sign
+  5: bicycle
+  6: car
+  7: ball
+  8: light
+  9: garbage can
+  10: uav
+  11: tricycle
+
+nc: 12
+
+modalities: [rgb, ir, depth]
+
+# 数据路径
+data:
+  root: 初赛数据集-面向城市场景的多模态目标检测/训练集/AIC2026_Train_2000
+  test_root: 初赛数据集-面向城市场景的多模态目标检测/测试集/AIC2026_PHASE_1_1000
+  visible_dir: visible
+  infrared_dir: infrared
+  depth_dir: depth
+  label_dir: labels
+  val_ratio: 0.2
+  seed: 42
+
+depth:
+  max_val: 19999
+
+model:
+  yaml: yolov8x.yaml
+  scale: x
+  pretrained: yolov8x.pt
+  ch: 5
+
+train:
+  imgsz: 640
+  batch_size: 8              # yolov8x 640 尺度 batch 8 (24GB 卡), 若 OOM 降 4
+  epochs: 100
+  lr0: 0.01
+  lrf: 0.01
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  workers: 8
+  device: 0
+  save_dir: runs/train_x
+  resume: false
+  init_weights: null
+  freeze: 0
+  cls_weighted_sampling: false
+  # ---- 增强: 温和仿射 (与 yolov8l 一致) ----
+  mosaic_prob: 0.0
+  affine_prob: 0.5
+  flip_prob: 0.5
+  affine_degrees: 5.0
+  affine_translate: 0.05
+  affine_scale: 0.25
+  affine_shear: 0.0
+  # ---- EMA (关闭) ----
+  ema: false
+
+infer:
+  imgsz: 1024
+  conf_thres: 0.25
+  iou_thres: 0.7
+  max_det: 100
+  device: 0

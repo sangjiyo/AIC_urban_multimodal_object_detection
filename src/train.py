@@ -10,6 +10,7 @@ import argparse
 import copy
 import functools
 import math
+import random
 import time
 from collections import Counter
 from pathlib import Path
@@ -18,7 +19,7 @@ from pathlib import Path
 print = functools.partial(print, flush=True)
 
 import torch
-from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
+from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSampler
 
 from .config import load_config, resolve_data_root
 from .dataset import TriModalDataset
@@ -122,47 +123,74 @@ def main():
     print = _tee_print
 
     # ---------- 数据 ----------
-    full = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"],
-                           train=True, seed=cfg["data"].get("seed", 42),
-                           mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob,
-                           affine_degrees=affine_degrees, affine_translate=affine_translate,
-                           affine_scale=affine_scale, affine_shear=affine_shear)
-    n = len(full)
+    # 用基础尺度构建一次 dataset 仅用于样本划分 (samples 按 stem 排序, 与尺度无关)
+    probe = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"], train=False)
+    n = len(probe)
     val_ratio = cfg["data"].get("val_ratio", 0.2)
     n_val = max(1, int(round(n * val_ratio)))
     indices = torch.randperm(n, generator=torch.Generator().manual_seed(cfg["data"].get("seed", 42))).tolist()
     val_idx, train_idx = indices[:n_val], indices[n_val:]
 
-    train_dataset = Subset(full, train_idx)
-    # 验证集禁用增强 (重建一个 train=False 的 dataset 用于 val)
+    # 多尺度训练范围 (config: train.multi_scale = [min, max]), None 则固定尺度
+    ms_range = tc.get("multi_scale")
+
+    # 伪标签数据根目录 (可选, 与真实训练集 ConcatDataset 合并)
+    pseudo_path = None
+    if cfg["data"].get("pseudo_root"):
+        pseudo_path = Path(cfg["data"]["pseudo_root"])
+        if not pseudo_path.is_absolute():
+            pseudo_path = Path(__file__).resolve().parent.parent / pseudo_path
+        print(f"[数据] 伪标签数据目录: {pseudo_path}")
+
+    # 验证集 (固定推理尺度, 禁用增强)
     val_full = TriModalDataset(root, imgsz=imgsz, max_depth=cfg["depth"]["max_val"], train=False)
 
-    # 可选: 类别加权采样 (针对弱类过采样, 缓解类别不平衡, 借鉴 SAR 国一两阶段精修)
-    sampler = None
+    # 类别加权采样权重预计算 (不依赖尺度)
+    sample_weights = None
     if cls_weighted:
         cls_count = Counter()
         for idx in train_idx:
-            for l in full._load_labels(full.samples[idx]):
+            for l in probe._load_labels(probe.samples[idx]):
                 cls_count[int(l[0])] += 1
-        # 类别权重 = 1/sqrt(freq), 归一化到均值 1 (弱类权重高, 被过采样)
         cls_w = {c: 1.0 / math.sqrt(cnt) for c, cnt in cls_count.items()}
         mw = sum(cls_w.values()) / max(1, len(cls_w))
         cls_w = {c: w / mw for c, w in cls_w.items()}
-        # 样本权重 = 样本内类别权重的最大值 (含弱类的样本整体被过采样)
         sample_weights = []
         for idx in train_idx:
-            labels = full._load_labels(full.samples[idx])
+            labels = probe._load_labels(probe.samples[idx])
             w = max((cls_w[int(l[0])] for l in labels), default=1.0) if len(labels) else 1.0
             sample_weights.append(w)
-        sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_idx), replacement=True)
         print(f"[采样] 类别加权采样: 权重 { {k: round(v, 2) for k, v in sorted(cls_w.items())} }")
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=(sampler is None), sampler=sampler,
-                              num_workers=workers, collate_fn=TriModalDataset.collate_fn,
-                              pin_memory=(device.type == "cuda"))
+    def make_train_loader(cur_sz: int, epoch: int):
+        """按当前尺度重建训练 dataset + loader (多尺度训练每 epoch 切换尺度)。"""
+        ds = TriModalDataset(root, imgsz=cur_sz, max_depth=cfg["depth"]["max_val"],
+                             train=True, seed=cfg["data"].get("seed", 42) + epoch,
+                             mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob,
+                             affine_degrees=affine_degrees, affine_translate=affine_translate,
+                             affine_scale=affine_scale, affine_shear=affine_shear)
+        ds = Subset(ds, train_idx)
+        # 合并伪标签数据 (与真实训练集共享增强)
+        if pseudo_path is not None:
+            pseudo_ds = TriModalDataset(pseudo_path, imgsz=cur_sz, max_depth=cfg["depth"]["max_val"],
+                                        train=True, seed=cfg["data"].get("seed", 42) + epoch,
+                                        mosaic_prob=mosaic_prob, affine_prob=affine_prob, flip_prob=flip_prob,
+                                        affine_degrees=affine_degrees, affine_translate=affine_translate,
+                                        affine_scale=affine_scale, affine_shear=affine_shear)
+            ds = ConcatDataset([ds, pseudo_ds])
+        # 类别加权采样 (伪标签样本权重设 1.0)
+        sampler = None
+        if cls_weighted:
+            w = sample_weights + [1.0] * (len(ds) - len(sample_weights))
+            sampler = WeightedRandomSampler(w, num_samples=len(ds), replacement=True)
+        loader = DataLoader(ds, batch_size=batch_size,
+                            shuffle=(sampler is None), sampler=sampler,
+                            num_workers=workers, collate_fn=TriModalDataset.collate_fn,
+                            pin_memory=(device.type == "cuda"))
+        return loader, len(ds)
 
-    print(f"[数据] 总样本 {n}, 训练 {len(train_idx)}, 验证 {len(val_idx)}, imgsz {imgsz}")
+    print(f"[数据] 真实样本 {n} (训练 {len(train_idx)}, 验证 {len(val_idx)}), 基础 imgsz {imgsz}"
+          + (f", 多尺度 {ms_range}" if ms_range else ""))
 
     # ---------- 模型 ----------
     if args.fusion:
@@ -207,6 +235,14 @@ def main():
 
     for epoch in range(epochs):
         model.train()
+        # 多尺度: 每 epoch 随机选尺度并重建 loader
+        if ms_range:
+            lo, hi = ms_range
+            cur_sz = random.randint(lo // 32, hi // 32) * 32
+        else:
+            cur_sz = imgsz
+        train_loader, n_train = make_train_loader(cur_sz, epoch)
+
         # 学习率: warmup + cosine
         if epoch < warmup_epochs:
             lr = lr0 * (epoch + 1) / max(1, warmup_epochs)
@@ -244,7 +280,7 @@ def main():
         # ---------- 验证 (用 EMA 权重, 未启用 EMA 时直接用 model) ----------
         m = validate(ema if ema is not None else model, val_full, val_idx, device)
         cur_map = m["map50_95"]
-        print(f"[epoch {epoch + 1}/{epochs}] train_loss {total_loss / max(1, nb):.3f}  "
+        print(f"[epoch {epoch + 1}/{epochs}] imgsz {cur_sz}  train_loss {total_loss / max(1, nb):.3f}  "
               f"val mAP@50-95 {cur_map:.4f}  ({time.time() - t0:.1f}s)")
 
         # 保存 best / last (保存 EMA 权重, 未启用 EMA 时保存 model 权重)
